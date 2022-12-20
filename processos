@@ -1,0 +1,180 @@
+AF 2.1 - Comentários e erros comuns
+Essa página descreve erros comuns da atividade e no final mostra um código que trata de algumas especificidades do gerenciamento de processos POSIX. Esse código no final pode servir para resolver eventuais dúvidas remanescentes.
+
+Erros comuns
+fork() duplo
+Esse é um erro de POO I, não de INE5410, mas ainda assim acontece. Lembrem que chamar uma função é diferente de olhar o resultado dela.
+=====================================================
+pid_t child = fork();
+if (fork() == 0) {
+    //filho
+} else {
+    //pai
+}
+=====================================================
+filho que não sai
+=====================================================
+pid_t child = fork();
+if (child == 0) {
+    printf("Filho 1 -- %d\n", getpid());
+} else {
+  while (wait(0) >= 0);
+}
+child = fork();  // @@@@@@@@
+if (child == 0) {
+    printf("Filho 2 -- %d\n", getpid());
+}
+=====================================================
+Esse código produz a seguinte saída:
+=====================================================
+Filho 1 -- 2371
+Filho 2 -- 2372
+Filho 2 -- 2383
+=====================================================
+O problema é que tanto o pai quanto o filho 1 chegam no fork() marcado com @’s. A solução é fazer um return (se estivermos no main) ou exit(0) após o printf("Filho 1 -- %d\n", getpid())
+
+Filho que entra no for
+=====================================================
+for (int i = 0; i < 2; ++i) {
+    if (!fork())
+       printf("Filho com i=%d, PID=%d\n", i, getpid());
+}
+=====================================================
+A saída é essa:
+=====================================================
+Filho com i=0, PID=23781
+Filho com i=1, PID=23782
+Filho com i=1, PID=23783
+=====================================================
+O problema é o mesmo que o apresentado no item anterior. O filho criado quando i=0 continua a execução do for, da mesma forma que o pai. Logo tanto o pai quanto o filho do i=0 criam cada um filho com i=1. A solução é fazer um return, exit(0) ou break.
+
+Funções que não retornam
+Além do return, a função exit() e as funções exec*() não retornam. Portanto não faz sentido escrever código que irá executar após essas funções. Vejam esse código executado pelos 2 filhos do exercício 2:
+=====================================================
+for(int j=0; j<3; j++){
+    wait(NULL);
+    printf("Processo %d finalizado\n", getpid());
+    exit(0);
+}
+=====================================================
+O aluno quiz fazer um wait() para cada um dos três netos, mas ele colocou duas coisas dentro desse for que não deveriam estar lá:
+
+Cada processo só termina uma vez.
+Um exit(0) no for é a mesma coisa que não ter um for.
+Árvore de ifs
+Muitos de vocês, quando precisam fazer uma árvore de processos, fazem uma árvore de ifs. Não descontei ponto por isso, mas percebi que vocês sofreram mais do que deveriam.  Pra entender o problema, vou tentar seguir o raciocínio que observei.
+
+Joãozinho quer criar único processo filho (joãozinho também não gosta de checar erros):
+=====================================================
+  if (fork()) printf("pai\n");
+  else        printf("filho\n");
+=====================================================
+Agora joãozinho quer 2 filhos:
+=====================================================
+  if (fork()) {
+    if (fork()) {
+      printf("pai\n");
+    } else {
+      printf("filho 2\n");
+    }
+  } else {
+    printf("filho 1\n");
+  }
+=====================================================
+E se Joãozinho quiser 666 filhos? Ele vai precisar combinar o primeiro caso (1 filho) com um for:
+=====================================================
+  for (int i = 0; i < 666/ ++i) {
+    if (fork() == 0) {
+      printf("filho %d\n", i);
+      return 0; // (ou exit(0)) --  importante!
+    }
+  }
+  printf("pai\n");
+=====================================================
+Observem que a versão com for já seria mais legível mesmo se fossem apenas 2 ou 3 filhos, visto que o comportamento dos filhos é similar.
+
+Nos exercícios de fixação pra fork, as vezes é melhor fazer for, as vezes é melhor fazer ifs aninhados. Alguns exercícios precisam misturar as duas estratégias.
+
+Sequência fork()/wait()
+No exercício 2 vocês tinham que fazer um sleep(5) nos processos neto. Esse sleep está no enunciado para que quem cometesse o erro explicado nessa seção percebesse o que fez de errado. Curiosamente, acharam melhor remover o sleep() ou fazer um sleep(1) achando que iriam me enganar.
+
+O que estava causando o problema não era o sleep mas sim, essa lógica:
+=====================================================
+for (int i = 0; i < 3; ++i) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        sleep(5); // filho
+        exit(0);
+    } else {
+        waitpid(pid, NULL, 0); //pai
+    }
+}
+=====================================================
+Imaginem nessa ASCII art abaixo que o eixo horizontal representa o tempo. Vejam o que o código acima produz:
+=====================================================
+         15 segundos!
+         ___________
+        /           \
+Pai     ##~~~~~~##|
+Filho 1   ##      |
+Filho 2     ##    |
+Filho 3       ##  |
+                  v
+               Término
+=====================================================
+Legenda: 
+ # -> processando
+ ~ -> esperando
+O esperado seria:
+=====================================================
+       5 segundos!
+         _____
+        /     \
+Pai     ##~~##|
+Filho 1   ##  |
+Filho 2   ##  |
+Filho 3   ##  |
+              v
+           Término
+=====================================================
+Legenda: 
+ # -> processando
+ ~ -> esperando
+
+Recomendações para o mundo Real
+Há dois aspectos importantes que não foram avaliados. 1. Processos filhos podem ser mortos com sinais (ex: alguém faz um kill PID_DO_FILHO) 2. O processo pai pode ser interrompido por um sinal, e se o sinal não matar ele, ele pode retornar do wait() com -1, setando errno para EINTR. Isso nunca acontecerá nessa disciplina.
+
+Usem esse código logo abaixo para brincar com o caso 1, onde vocês matam (ou suspendem com SIGSTOP) o filho. Salvem em um arquivo wait.c e testem com gcc -std=c11 wait.c && ./a.out
+=====================================================
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/wait.h>
+
+int main(int argc, char** argv) {
+    pid_t child = fork();
+    if (child) {
+        printf("Pai %d esperando....\n", getpid());
+        int st;
+        pid_t ch;
+        do {
+            ch = waitpid(child, &st, WUNTRACED);
+            printf("ch=%d, st=%d, exited=%d, signaled=%d, stopped=%d, "
+                   "exit_status=%d, term_sig=%d, stopsig=%d\n",
+                   ch, st, WIFEXITED(st), WIFSIGNALED(st), WIFSTOPPED(st),
+                   WEXITSTATUS(st), WTERMSIG(st), WSTOPSIG(st));
+        } while((!WIFEXITED(st) && !WIFSIGNALED(st)) || errno == EINTR);
+        // Se estivessemos esperando todos os filhos, com wait(&st):
+        // while(ch >= 0 || errno == EINTR);
+        if (ch < 0)
+            perror("wait() falhou por");
+    } else {
+        printf("Filho %d\n", getpid());
+        printf("Espere 30s ou me mate com um kill %d ou um kill -SIGSEGV %d\n", getpid(), getpid());
+        printf("Um kill -SIGSTOP %d vai causar um alerta falso.\n", getpid());
+        sleep(30);
+    }
+    return 0;
+}
+=====================================================
