@@ -1,0 +1,124 @@
+AF 2.8 - Comentários e erros comuns
+Essa página descreve erros comuns da atividade.
+
+Solução
+Os dois exercícios dessa atividade consistiam em garantir uma ordem específica de lock()s/sem_waits()s. O ponto central das duas soluções é garantir um ordenamento global da aquisição dos recursos (mutexes e threads) dentro das threads que pretendem ter mais de um recruso ao mesmo tempo.
+
+O exercício 1 era apenas um aquecimento para o 2, então vejam essa situação de deadlock no exercício 2:
+
+
+
+As transferências são incontroláveis. Um banco permite transferências entre quaisquer contas, em qualquer direção. Por um acaso do destino, 3 transações entraram no sistema de forma concorrente:
+
+1 -> 2
+2 -> 3
+3 -> 1
+Essas transferências formam um ciclo, como desenhado acima. O código original fazia primeiro um lock() no mutex da conta origem e então um lock na conta destino, com o intuito de ter os dois mutexes sob sua propriedade antes de fazer a transferência. Nesse caso cada uma das três threads consegue um dos mutexes, mas surge um ciclo de espera: T1 espera T2 (que tem o mutex 2), que espera T3 (que tem o mutex 3) que então espera T1 (que tem o mutex 1).
+
+Para resolver o deadlock devemos impedir que o ciclo de espera se forme. Uma caraterística de ciclos é que eles envolvem trocas de direção. Note que se todas as transações fossem de uma conta com x para uma conta y onde x < y, não iria ocorrer o deadlock. Desenhem pontos em uma reta e não conseguirão construir um ciclo entre os pontos usando setas, se todas as setas apontarem na mesma direção. Ao removermos uma das condições necessárias para formar um ciclo entre os mutexes, também evitamos a possibilidade de ciclos de espera entre as threads. Vejam como se comporta a solução:
+
+
+
+O mutex da conta 3, nesse exemplo ainda não foi locado, mas a T2 conseguirá obtê-lo. Após obter o mutex da conta 3, a T2 fará a transferência e irá liberar o mutex da conta 2, permitindo que T1 faça sua transferência. Somente após T1 terminar sua transferência T3 conseguirá obter o mutex da conta 1. Essa demora que T3 sofre é um pequeno preço a se pagar para evitar o deadlock.
+
+A solução correta do exercício 2 então seria adicionar esse if/else:
+
+if(origem->id < destino->id) {
+    pthread_mutex_lock(&origem->mutex);
+    pthread_mutex_lock(&destino->mutex);
+} else {
+    pthread_mutex_lock(&destino->mutex);
+    pthread_mutex_lock(&origem->mutex);
+}
+Solução meio certa para o exercício 2
+Havia uma solução não ideal:
+
+pthread_mutex_lock(&gMtxLock);
+pthread_mutex_lock(&origem->mutex);
+pthread_mutex_lock(&destino->mutex);
+pthread_mutex_unlock(&gMtxLock);
+
+transferir_unsafe(origem, destino, valor);
+
+pthread_mutex_unlock(&origem->mutex);
+pthread_mutex_unlock(&destino->mutex);
+Essa solução é livre de deadlocks pois impede que duas threads ou mais estejam em estado de espera. No entanto, essa abordagem reduz a eficiência do programa. A solução ainda é válida pois ela não é tão ruim quanto usar um único mutex durante toda a transação.
+
+Erros comuns
+Supermutex
+Esse código não tem deadlocks:
+
+pthread_mutex_t gBancoMtx = PTHREAD_MUTEX_INITIALIZER;
+
+void transferir(conta_t *origem, conta_t *destino, double valor) {
+    pthread_mutex_lock(&gBancoMtx);
+    transferir_unsafe(origem, destino, valor);
+    pthread_mutex_unlock(&gBancoMtx);
+}
+No entanto, é uma forma ineficiente de lidar com o problema. A maioria das transações não causa deadlocks. Ao usar um único mutex todos pagam um preço extremamente alto (em termos de tempo) por um problema que talvez nem fosse acontecer. Imaginem o caos se alguém colocasse algo assim nos servidores da Visa.
+
+Locks não sobrepostos
+Primeiramente, o uso da função transferir_unsafe() era obrigatório, então essa solução abaixo é um pouco ilegal. Segundo, essa solução só funciona para esse exemplo didático. Se houvesse outras operações no banco como abertura/fechamento/bloqueio/migração de conta, essas outras operações precisariam ser sincronizadas com as threads executando transferências. Por exemplo: não poderiamos permitir que uma conta seja bloqueada ou fechada no meio de uma transferência, ou teriamos problemas com a justiça/BC.
+
+void transferir(conta_t *origem, conta_t *destino, double valor) {
+    pthread_mutex_lock(&origem->mutex);
+    origem->saldo -= valor;
+    pthread_mutex_unlock(&origem->mutex);
+    
+    pthread_mutex_lock(&destino->mutex);
+    destino->saldo += valor;
+    pthread_mutex_unlock(&destino->mutex);
+}
+Não chamar transferir_unsafe
+Um aluno evitou o segundo problema acima e decidiu fazer isso:
+
+void transferir(conta_t *origem, conta_t *destino, double valor) {
+    pthread_mutex_lock(&origem->mutex);
+    pthread_mutex_lock(&destino->mutex);
+
+    origem->saldo -= valor;
+    destino->saldo += valor;
+
+    pthread_mutex_unlock(&destino->mutex);
+    pthread_mutex_unlock(&origem->mutex);
+}
+Esse código não tem nenhum problema novo, mas mantém o deadlock. A única coisa que faltou aqui (em relação a transferir_unsafe) foi um sleep de 200ms.  Embora o sleep não seja a causa do deadlock ele aumenta a probabilidade do deadlock acontecer. Da forma como esse aluno fez, o deadlock ainda existe mas acontecerá apenas no pior momento possível.
+
+pthread_mutex_trylock()
+As funções pthread_mutex_trylock() e sem_trywait() não são tão nocivas quanto sem_getvalue() e seu uso pode ser justificável. No entanto, essa atividade não era um caso onde trylock fosse justificável.
+
+void transferir(conta_t *origem, conta_t *destino, double valor) {
+    pthread_mutex_lock(&origem->mutex);
+    while (pthread_mutex_trylock(&destino->mutex) != 0) {
+        pthread_mutex_unlock(&origem->mutex);
+        pthread_mutex_lock(&origem->mutex);        
+    }
+    
+    transferir_unsafe(origem, destino, valor);
+
+    pthread_mutex_unlock(&origem->mutex);
+    pthread_mutex_unlock(&destino->mutex);
+}
+Esse código evita o deadlock pois caso uma thread não consiga adquirir o segundo mutex, ela supõe que  é parte de um deadlock e libera o mutex que já tinha. Entre o unlock e o segundo lock de origem->destino, é possível que outras threads participantes do deadlock consigam avançar e deixem de competir pelo mutex do destino. No entanto, o que está ocorrendo aqui é um busy-wait (espera ocupada). As threads que não conseguem pegar o mutex de destino ficam insistentemente re-tentando, o que causará:
+
+Lentidão da aplicação (e do computador inteiro) pois threads com trabalho útil a ser feito não tem a chance de usar a CPU
+Superaquecimento
+O derretimento das calotas polares, dor e sofrimento, não necessariamente nessa ordem.
+pthread_exit()
+void transferir(conta_t *origem, conta_t *destino, double valor) {
+    pthread_mutex_lock(&origem->mutex);
+    pthread_mutex_lock(&destino->mutex);
+    transferir_unsafe(origem, destino, valor);
+    pthread_mutex_unlock(&destino->mutex);
+    pthread_mutex_unlock(&origem->mutex);
+    // ^^^ daqui para cima, tudo igual
+    pthread_exit(NULL);
+}
+Essa solução evita o deadlock ao literalmente matar todas as threads que são caixas do banco. Seria o equivalente a destruir todas os carros, motos, ônibus e caminhões do Brasil para impedir que pessoas sofram acidentes de trânsito.
+
+Tentativas de ver se vai dar ruim
+Alguns alunos ainda em sala cogitaram criar estruturas de dados adicionais que os ajudassem a detectar deadlocks. A ideia tem boas intenções, mas qualquer implementação nesse sentido traria duas dificuldades:
+
+É necessário construir um grafo de esperas (grafos é matéria da 4a fase)
+É necessário concorrentemente modificar esse grafo e essa modificação concorrente para verificar se há deadlocks iria causar deadlocks com a mesma "cara"
+Vocês vão aprender formas de fazer isso em BD 2 (controle de concorrência). Por enquanto, vamos manter as coisas simples.
