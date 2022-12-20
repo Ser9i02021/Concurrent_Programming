@@ -1,0 +1,43 @@
+AF 2.4 - Comentários e erros comuns
+Essa página descreve erros comuns da atividade.
+
+Cobertor curto
+Vejam essa tentativa no exercício 2, com a posição de 4 threads anotada
+
+// Thread 3 e 4 bloqueadas esperando entrar na região crítica
+pthread_mutex_lock(&matrix_mutex);
+minha_linha = linha_atual;             // t=0 Thread 1 executou essa linha
+minha_coluna = coluna_atual;           // t=3
+coluna_atual += 1;                     // t=4
+pthread_mutex_unlock(&matrix_mutex);
+if (coluna_atual >= tamanho_matriz) {
+    coluna_atual = 0;                  // t=1 Thread 2
+    linha_atual += 1;                  // t=2 Thread 2 executou essa linha
+}
+if (minha_linha >= tamanho_matriz)  
+    break;
+O mutex funciona corretamente, mas a thread 2 ainda assim consegue alterar coluna_atual e linha_atual concorrentemente com as threads na região crítica. Imagine que a matriz resultado tenha 10 linhas e 10 colunas. No t=0 a thread 1 iria tentar setar minha_linha=2, minha_coluna=9. Mas é possível que antes de a Thread 1 conseguir setar minha_coluna, outra thread (no caso a Thread 2) entre no if. O resultado é que a Thread 1 vai acabar processando a célula na linha 2 e coluna 0! Ou seja ela vai processar algo que já está a cargo de outra thread e nenhuma thread vai processar a célula na linha 2 coluna 9.
+
+Região crítica desnecessária
+O uso de mutex nesse trecho não é necessário:
+
+pthread_mutex_lock(&matrix_mutex);
+for (i = 0; i < tamanho_matriz; i++) {
+    resultado[minha_linha][minha_coluna] += matriz1[minha_linha][i] * matriz2[i][minha_coluna];
+}
+pthread_mutex_unlock(&matrix_mutex);
+O primeiro trecho deveria atribuir cada célula da matriz resultado à uma thread. Como cada célula só será computada por uma única thread, não há condições de corrida nesse for interno.
+
+Falta de pthread_mutex_init()
+Alguns alunos esqueceram de inicializar (e/ou destruir) o mutex. A maioria desses casos aconteceram no exercício 2. Os programas, no entanto, funcionavam mesmo com esse erro (grave). Foi um pouco de sorte. Em C variáveis globais são colocadas em uma região especial da memória que é preenchida totalmente com zeros. Por uma coincidência, isso é uma inicialização válida na biblioteca pthread do Linux. Isso pode deixar de funcionar assim a qualquer momento. 
+
+Outro esquecimento comum foi pthread_mutexattr_destroy() entre alguns alunos que criaram um mutex recursivo no exercício 3. Na implementação atual de pthreads do Linux, isso não é um problema. No entanto isso pode se tornar um problema se a implementação for alterada ou se o programa for executado em outro sistema.
+
+Em resumo, nem tudo que funciona está certo.
+
+Região crítica no exercício 2
+Apenas um aluno errou a região crítica e ganhou uma explicação na submissão dele. É interessante apontar um detalhe que pode ter passado batido. Por que o linha_atual < tamanho_matriz não precisa ser parte da região crítica? Para entender isso, é importante considerar duas coisas:
+
+Primeiro, os tipos sendo acessados são int’s, que em  processadores de 32 bits ou mais (salvo eventuais processadores exóticos), tem acesso (leitura e escrita) em uma única instrução. Como o acesso é feito em uma única instrução, não é possível observar “meia” escrita. Ou seja, se um int tem o valor 0x0 e uma thread concorrentemente escreve o valor 0xabcd1234 enquanto outra lê, a thread leitora só pode ler 0x0 ou 0xabcd1234. A forma como o processador é construído não permite que seja lido 0x00001234 nem 0xabcd0000.
+
+Segundo, a única leitura errada que poderia ser feita é ler um valor muito antigo de linha_atual. Nesse caso o controle entra no loop quando não deveria ter entrado. O efeito será o incremento de coluna_atual (e muito raramente de linha_atual). No entanto, os efeitos para nisso, pois o if (minha_linha >= tamanho_matriz) fará com que o controle saia do loop antes de acessar células inexistentes.
