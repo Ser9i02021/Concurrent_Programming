@@ -1,0 +1,141 @@
+AF 2.2 - Comentários e erros comuns
+Essa página descreve erros comuns da atividade.
+
+Erros comuns
+Threads serializadas
+Todo semestre sempre ocorre um caso desses:
+
+for (int j = 0; j < n_threads; j++){
+    pthread_create(&threads[j], NULL, incrementa, (void *)&n_loops);
+    pthread_join(threads[j],NULL);
+}
+Imaginem que no diagrama abaixo, o eixo x representa o tempo. O código acima produz o seguinte com n_threads=4:
+
+T0 @ main()        ##~~#~~#~~#~~##|
+T1 @ incrementa()    ##           |
+T2 @ incrementa()       ##        |
+T3 @ incrementa()          ##     |
+T4 @ incrementa()             ##  |
+                                  v
+                               Término
+Legenda: 
+ # -> processando
+ ~ -> esperando
+Esse código, apesar de criar 4 threads não apresenta nem concorrência nem paralelismo. O esperado era um loop de pthread_create() seguido por um loop de pthread_join()s, de forma a efetivamente explorar o paralelismo (e causar as condições de corrida):
+
+T0 @ main()        ##~~##|
+T1 @ incrementa()    ##  |
+T2 @ incrementa()    ##  |
+T3 @ incrementa()    ##  |
+T4 @ incrementa()    ##  |
+                         v
+                      Término
+Legenda: 
+ # -> processando
+ ~ -> esperando
+Resto
+Um erro que aconteceu com algumas submissões foi ignorar o resto da divisão. Suponham a_size = 10 e n_threads = 3. Ao dividirmos chunk = a_size/n_thread, obtemos 3 (divisão de inteiros sempre arredonda para baixo). Colocando em uma tabela, a solução ingênua teria esse efeito:
+
+Thread responsável	0	0	0	1	1	1	2	2	2	?
+Índice em a e b	0	1	2	3	4	5	6	7	8	9
+A solução do gabarito é deixar a sobra para a última thread:
+
+Thread responsável	0	0	0	1	1	1	2	2	2	2
+Índice em a e b	0	1	2	3	4	5	6	7	8	9
+Outras formas de divisão de trabalho
+A forma do gabarito não é a única forma válida, ela é a forma mais simples. Assumindo n_threads = 3 e a_size = 11, vejam outras formas de distribuir o trabalho:
+
+A intenção de quem fez isso foi distribuir mais justamente o trabalho referente ao resto (nesse caso 2). Para um problema simples (soma de inteiros) não haverá um ganho relevante. Esse tipo de preocupação seria mais importante se a cada elemento do array fosse realizada uma operação mais custosa.
+
+Thread responsável	0	0	0	0	1	1	1	1	2	2	2 
+Índice em a e b	0	1	2	3	4	5	6	7	8	9	10
+A estratégia abaixo, entrelaça as threads ao longo do array. Esse tipo de estratégia também tenta ser mais justo. No entanto, essa estratégia é péssima devido a conflitos de cache, que ao serem resolvidos implicam em sincronização entre os núcleos de processamento e consequente perda de paralelismo. Conflitos de cache são assunto de Organização de Computadores, e isso foi apenas uma curiosidade.
+
+Thread responsável	0	1	2	0	1	2	0	1	2	0	1 
+Índice em a e b	0	1	2	3	4	5	6	7	8	9	10
+Cópia no lugar de ponteiro
+No exercício 3, era necessário que cada thread produzisse uma soma parcial referente ao seu slice dentro dos vetores a e b. Essa soma poderia ser retornada com pthread_exit(soma) onde soma é um ponteiro criado com malloc(). Uma forma mais simples era cada thread modificar um atributo da struct que recebe (como um ponteiro) e fazer com que o main lesse desse atributo após o join (isso evita um par de malloc()/free()).
+
+No entanto, isso não funciona se cada thread copiar a struct:
+
+args_t args = *((args_t *)arg);
+for (int i = args.begin; i < args.end; i++) {
+    args.sum += args.a[i] * args.b[i];
+}
+pthread_exit(NULL);
+O erro foi ter um args_t args ao invés de um args_t* args
+
+Trabalho dobrado.
+Alguns alunos dividiram o trabalho entre as threads corretamente no exercício 3, mas re-introduziram o vetor c fazendo com que após os pthread_join()s houvesse um vetor c, com tamanho a_size contendo a soma entre os elementos em a e b. Ao fazer isso, o programa paralelo perde muita eficiência. Vejam o diagrama abaixo:
+
+                       a_size +'s
+                         /----\
+T0 @ main()        ##~~~~~####
+T1 @ incrementa()   ######    
+T2 @ incrementa()   ######    
+T3 @ incrementa()   ######    
+T4 @ incrementa()   ######    
+                   \______/
+              a_size +'s e a_size *'s
+Legenda: 
+ # -> processando
+ ~ -> esperando
+O esperado (gabarito) seria isso:
+
+                     n_threads +'s
+                         /-\
+T0 @ main()        ##~~~~~#
+T1 @ incrementa()   ######    
+T2 @ incrementa()   ######    
+T3 @ incrementa()   ######    
+T4 @ incrementa()   ######    
+                   \______/
+              a_size +'s e a_size *'s
+Legenda: 
+ # -> processando
+ ~ -> esperando
+Retorno de variável local
+Ao retornar um ponteiro para variável local, retorna-se um ponteiro para uma posição na memória que terá um novo uso tão logo a função retorna. Ou seja, enquanto estamos dentro da função, &sum aponta para sum. Mas ao sairmos da função, sum deixa de existir.
+
+void* thread_func(void* arg) {
+    args_t* p = (args_t*)arg;
+    double sum = 0;
+    for (int i = p->begin; i < p->end; ++i) {
+        sum += p->a[i] * p->b[i];
+    }
+    return &sum; //sum não vai mais existir quando o ponteiro for derreferenciado!
+}
+Threads alterando variável global
+Como foi abordado no exercício 1, múltiplas threads lendo e escrevendo em uma variável global apenas irão conseguir gerar lágrimas. Na próxima atividade vocês verão como identificar condições de corrida e evitá-las através de exclusão mútua. Nessa atividade a abordagem a ser adotada era simplesmente evitar o surgimento de condições de corrida, evitando a alteração concorrente de variáveis.
+
+double result = 0;
+void* thread_func(void* arg) {
+    args_t* p = (args_t*)arg;
+    for (int i = p->begin; i < p->end; ++i) {
+        result += p->a[i] * p->b[i]; //lembrem do exercicio_1
+    }
+    return NULL;
+}
+Variável não inicializada
+Lembrem que variáveis que são definidas sem um valor inicial não são inicializadas, e por isso iniciam com LIXO. Lixo de memória nada mais é que um valor imprevisível e errado. Usualmente o lixo é um valor extremamente alto (positivo ou negativo). No entanto, o lixo também pode eventualmente ter valores normais, como -1, 0 ou 4.
+
+void* thread_func(void* arg) {
+    args_t* p = (args_t*)arg;
+    double sum; //lido como sum = LIXO;
+    for (int i = p->begin; i < p->end; ++i) {
+        sum += p->a[i] * p->b[i];
+    }
+    return &sum;
+}
+Uma struct de argumentos, muitas threads
+//...
+args_t args;
+args.a = a;
+args.b = b;
+for (int i = 0; i < n_threads; ++i) {
+    args.begin = i*chunk;
+    args.end = i == n_threads-1 ? a_size : args.begin + chunk;
+    pthread_create(&threads[i], NULL, thread_func, &args);
+}
+//...
+Nesse exemplo, vejam que há n_threads acessando a mesma struct concorrentemente. Antes da thread[0] começar efetivamente a executar, a thread principal pode já ter modificado a struct. É impossível prever o que vai acontecer. As únicas certezas nesse caso são dor e sofrimento.
