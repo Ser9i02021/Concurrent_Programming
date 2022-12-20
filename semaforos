@@ -1,0 +1,139 @@
+AF 2.5 - Comentários e erros comuns
+Essa página descreve erros comuns da atividade.
+
+Ineficiência
+Como abordado na explicação textual do produtor/consumidor, o objetivo do problema produtor/consumidor é maximizar o paralelismo do consumo e da produção. O ideal a ser buscado é permitir que produção e consumo aconteçam em paralelo e que (quase) nunca a produção precise parar devido à um consumidor lento. Isso é algo que recorrentemente aparece:
+
+void *consumidor_func(void *arg) {
+    while (1) {
+        sem_wait(&cheio);
+        
+        pthread_mutex_lock(&consumidor_mtx); 
+        indice_consumidor = (indice_consumidor + 1) % tamanho_buffer; 
+        int produto = buffer[indice_consumidor];
+        pthread_mutex_unlock(&consumidor_mtx);
+         
+        if (produto >= 0) {
+            consumir(produto); //Consome o item obtido.
+            sem_post(&vazio);
+        } else {
+            sem_post(&vazio);
+            break; //produto < 0 é um sinal de que o consumidor deve parar
+        }
+    }
+    return NULL;
+}
+Notem que enquanto o consumo do produto não for concluído, o consumidor não devolve o token. Esse token que era uma permissão de consumo precisa ser retornado como uma permissão de produção. Logo após o pthread_mutex_unlock() já não há mais possibilidade de condição de corrida e o produtor já poderia voltar a produzir. No entanto esse código injustamente bloqueia os produtores.
+
+Tokens perdidos
+Observem que se o buffer possui N posições, em qualquer dado momento, cada um dos N tokens deve estar em um desses lugares:
+
+No semáforo vazio (que alguns chamam de sem_prod)
+No semáforo cheio (que alguns chamam de sem_cons)
+Entre um sem_wait(&cheio) e um sem_post(&vazio) em uma thread consumidora
+Entre um sem_wait(&vazio) e um sem_post(&cheio) em uma thread produtora
+Observem esse código:
+
+void *consumidor_func(void *arg) {
+    while (1) {
+        sem_wait(&cheio);
+
+        pthread_mutex_lock(&consumidor_mtx);
+        indice_consumidor = (indice_consumidor + 1) % tamanho_buffer;
+        int produto = buffer[indice_consumidor];
+        pthread_mutex_unlock(&consumidor_mtx);
+        
+        if (produto >= 0) {
+            sem_post(&vazio);
+            consumir(produto); //Consome o item obtido.
+        } else {
+            break; //produto < 0 é um sinal de que o consumidor deve parar
+        }
+    }
+    return NULL;
+}
+Com esse código, toda vez que um consumidor termina, ele leva o token para a cova. Imagine que hajam 5 consumidores e 5 produtores usando um buffer de 3 posições. Após a morte de 3 consumidores, teríamos o starvation (inanição) de 2 consumidores (que nunca recebem seus -1) e de 2 produtores (ou do main, no gabarito), que nunca conseguem permissão de produzir -1's.
+
+Starvation (inanição) se n_consumidores != n_produtores
+No código inicial fornecido, cada produtor produzia um -1, que quando consumido, causava o término da thread consumidora. Haviam dois problemas nessa abordagem:
+
+Se n_produtores > n_consumidores, n_consumidores-n_produtores consumidores entravam em starvation
+Isso ocorre pois serão produzidos poucos -1s e alguns consumidores nunca receberão seu -1. Lembre que o mesmo -1 não pode ser consumido duas vezes (a fila garante isso).
+Se n_consumidores > n_produtores+tamanho_buffer, n_produtores-(n_consumidores+tamanho_buffer) produtores entravam em starvation
+Nesse caso, após a morte de todos os consumidores, os produtores ainda conseguirão produzir tantos -1s quanto há posições no buffer (todas as posições estarão vazias). No entanto se após encherem o buffer ainda houver produtores tentando produzir seu -1 eles entrarão em starvation pois não haverá mais nenhuma thread consumidora para liberar posições no buffer
+Confiram no gabarito que a única solução capaz de resolver ambos os problemas é chamar uma terceira thread que tem mais conhecimento da situação. A thread principal está numa posição de vantagem e conseguem responder todas essas perguntas:
+
+Quantos consumidores existem
+Quando os todos os produtos foram produzidos
+Quantos -1 já foram produzidos
+Usando essa vantagem, podemos alterar os produtores para que eles nunca gerem -1 ao terminar sua parte da produção. Isso facilita a programação do main(). Usando as respostas das três perguntas, o main só precisa fazer isso:
+
+    for (int i = 0; i < n_produtores; ++i)
+        pthread_join(produtor[i], NULL);
+
+    for (int i = 0; i < n_consumidores; ++i) {
+        sem_wait(&vazio);
+        buffer[indice_produtor = (indice_produtor+1) % tamanho_buffer] = -1;
+        sem_post(&cheio);
+Note que como o main sabe que não há mais nenhum outro produtor, ele não precisa adquirir o mutex de produtores. Ele ainda precisa agir como um produtor  esperando uma permissão de produção e emitindo permissões de consumo.
+
+sem_getvalue()
+NUNCA USEM ESSA FUNÇÂO. Aqueles que foram flagrados em sala receberam um aviso imediato. Sequer mostrarei o que tentaram fazer para evitar danos maiores. Realizar sincronização com essa funções sempre trará dois problemas:
+
+Busy-wait (espera ocupada)
+Condição de corrida
+Essa função existe principalmente para fins de debug. Ou seja, é mais comum chamar essa função de dentro do GDB do que efetivamente escrever ela em um programa C. Um caso onde ela pode ser útil é debugar cenários de starvation, como o dos tokens perdidos mencionados anteriormente.
+
+Otimização prematura é a raiz de todo mal (Knuth, Donald E.; 1974)
+Um aluno uma vez tentou aumentar o paralelismo fazendo isso:
+
+void *consumidor_func(void *arg) {
+    while (1) {
+        sem_wait(&cheio);
+        pthread_mutex_lock(&consumidor_mtx);
+        indice_consumidor = (indice_consumidor + 1) % tamanho_buffer;
+        int ind = indice_consumidor;
+        pthread_mutex_unlock(&consumidor_mtx);
+        sem_post(&vazio);
+
+        int produto = buffer[ind]; //isso não deveria ter saído da região crítica!
+        if (produto >= 0)
+            consumir(produto); //Consome o item obtido.
+        else
+            break; //produto < 0 é um sinal de que o consumidor deve parar
+    }
+    return NULL;
+}
+De acordo com o aluno, o script havia lhe atribuído 10, mas há uma condição de corrida espreitando pelas sombras. Consideremos um buffer de 2 posições, n_consumidores=2 e n_produtores=2. A tabela abaixo mostra o estado do programa após o retorno das chamadas de funções mostradas.
+
+cheio	cons_mtx	ind_cons	vazio	prod_mtx	ind_prod	buf	Cons 1	Cons 2	Prod 1	Prod 2
+0	1	0	2	1	0	{*, *}				
+0	1	0	1	1	0	{*, *}			wait(&vazio)	
+0	1	0	1	0	0	{*, *}			lock(&prod_mtx)	
+0	1	0	1	0	1	{*, 1}			(insere 1)	
+0	1	0	1	1	1	{*, 1}			unlock(&prod_mtx)	
+1	1	0	1	1	1	{*, 1}			post(&cheio)	
+1	1	0	0	1	1	{*, 1}				wait(&vazio)
+1	1	0	0	0	1	{*, 1}				lock(&prod_mtx)
+1	1	0	0	0	0	{2, 1}				(insere 2)
+1	1	0	0	1	0	{2, 1}				unlock(&prod_mtx
+2	1	0	0	1	0	{2, 1}				post(&cheio)
+1	1	0	0	1	0	{2, 1}	wait(&cheio)			
+1	0	0	0	1	0	{2, 1}	lock(&cons_mtx)			
+1	0	1	0	1	0	{2, 1}	ind=1			
+1	1	1	0	1	0	{2, 1}	unlock(&cons_mtx)			
+0	1	1	0	1	0	{2, 1}		wait(&cheio)		
+0	0	1	0	1	0	{2, 1}		lock(&cons_mtx)		
+0	0	0	0	1	0	{2, 1}		ind=0		
+0	1	0	0	1	0	{2, 1}		unlock(&cons_mtx)		
+0	1	0	0	1	0	{2, 1}		(lê 2)		
+0	1	0	1	1	0	{2, 1}		post(&vazio)		
+0	1	0	0	1	0	{2, 1}			wait(&vazio)	
+0	1	0	0	0	0	{2, 1}			lock(&prod_mtx)	
+0	1	0	0	0	1	{2, 3}			(insere 3)	
+0	1	0	0	1	1	{2, 3}			unlock(&prod_mtx)	
+1	1	0	0	1	1	{2, 3}			post(&cheio)	
+1	1	0	0	1	1	{2, 3}	(lê 3)			
+Ops! Cons 1 leu 3 ao invés de 1 no buffer e ninguém nunca vai consumir o produto “1”.
+
+O erro aqui foi o Cons 1 ter permitido que outro consumidor executasse. Embora os consumidores não tenham entrado em conflito diretamente, Cons 2 emitiu uma permissão de produção que fez com que Prod 1 escrevesse sobre uma posição na memória que Cons 1 pretendia ler e acreditava que ninguém mais escreveria.
