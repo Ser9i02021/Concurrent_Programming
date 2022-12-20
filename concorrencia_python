@@ -1,0 +1,50 @@
+AF 3.4 - Comentários e erros comuns
+Exercício 1
+
+No código inicial fornecido, a thread consumidora testa primeiramente se o buffer está vazio (if len(buffer) == 0). Em caso positivo, a thread bloqueia em uma variável condicional (item_no_buffer.wait()):
+
+def consumidor():
+  global buffer
+  for i in range(10):
+    with lock:
+      if len(buffer) == 0:
+        print('>>> Buffer vazio. Consumidor ira aguardar.')
+        item_no_buffer.wait()   # aguarda que haja um item para consumir 
+      item = buffer.pop(0)
+      print('Consumido %s (ha %i itens no buffer)' % (item,len(buffer)))
+      lugar_no_buffer.notify()
+    sleep(randint(0,2))         # fica um tempo consumindo...
+
+Como temos apenas uma thread consumidora, há uma garantia de que o buffer conterá pelo menos 1 elemento quando a thread consumidora for notificada e ganhar acesso ao lock. Portanto, a thread consumidora pode remover um item do buffer imediatamente após sair do bloqueio. Será que temos esta garantia quando executamos com mais de uma thread consumidora?
+
+Considere o seguinte cenário, com 1 thread produtora (P1) e 2 threads consumidoras (C1 e C2):
+
+C1 inicia executando, ganha acesso ao lock, verifica que o buffer está vazio, bloqueia na variável condicional (item_no_buffer.wait()) e libera o lock;
+P1 inicia sua execução, ganha acesso ao lock, insere um elemento no buffer, notifica uma thread consumidora (item_no_buffer.notify()) e libera o lock;
+C2 inicia sua execução, ganha acesso ao lock, verifica que o buffer não está vazio (possui 1 elemento), remove o elemento do buffer, notifica a thread produtora (lugar_no_buffer.notify()) e libera o lock;
+C1 finalmente ganha acesso ao lock ao desbloquear-se de item_no_buffer.wait() e tenta remover um item do buffer, mas o buffer está vazio!
+Este problema acontece pois C1 pode ser notificada (passo 3) mas não ganhar imediatamente acesso ao lock. No exemplo acima, C1 foi notificada mas quem ganhou acesso ao lock primeiro foi C2. Quando C1 finalmente ganha acesso ao lock, não há mais elemento no buffer. Isto acontece pois C1 não testou novamente se o buffer estava vazio após ser desbloqueada. Uma situação análoga poderá acontecer em execuções com mais de uma thread produtora.
+
+A correção deste bug é simples! Pense. sorriso
+
+Exercício 2
+Você já deveria saber a solução para este exercício! Se ainda tiver dúvidas, reveja o material didático sobre sincronização com semáforos usando POSIX Threads!
+
+Exercício 3
+Nesse exercício temos 3 threads: origem, ponte e destino. A origem envia as mensagens para a ponte, que as encaminha para o destino. 
+
+A origem deve enviar as mensagens da seguinte forma:
+
+    # envia mensagem para a ponte pela fila 1
+    fila1.put(msg)
+A ponte encaminha tudo que recebe em uma fila de mensagens para a outra fila:
+
+    # recebe mensagem na fila 1
+    msg = fila1.get()
+    # reenvia mensagem na fila 2
+    fila2.put(msg)
+Já o destino apenas recebe as mensagens e as imprime na tela:
+
+    # recebe mensagem na fila 2
+    msg = fila2.get()
+    print('Mensagem recebida:', msg)
