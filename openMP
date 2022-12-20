@@ -1,0 +1,89 @@
+AF 3.1 - Comentários e erros comuns
+Esta página apresenta alguns comentários sobre a atividade proposta.
+
+Exercício 1
+Esse exercício pedia que fosse feito algo que é justamente o principal uso do OpenMP, por isso é tão fácil. Bastava adicionar um pragma no for dentro de calcular():
+
+void calcular(double* c, int size, int n_threads) {
+    #pragma omp parallel for num_threads(n_threads)
+    for (long long int i = 0; i < size; i++) {
+        c[i] = sqrt(i * 32) + sqrt(i * 16 + i * 8) + sqrt(i * 4 + i * 2 + i);
+        c[i] -= sqrt(i * 32 * i * 16 + i * 4 + i * 2 + i);
+        c[i] += pow(i * 32, 8) + pow(i * 16, 12);
+    }
+}
+Notem que n_threads é usado com num_threads, não com schedule(static, n_threads). Esse é um erro mais frequente do que deveria. A cláusula schedule (que é o foco do exercício 2) diz respeito a política escalonamento de chunks do problema para as worker threads. O número de worker threads (num_threads) nada tem a ver com a política de escalonamento.
+
+Essa diretiva (a linha inteira do #pragma é uma diretiva) é uma combinação de duas constructs: região paralela e for worksharing (divisão de trabalho). Além dessas duas constructs, há uma cláusula especificando o número de threads a serem usadas na região paralela. Alternativamente, essa diretiva poderia ser divida em duas:
+
+#pragma omp parallel num_threads(n_threads)
+#pragma omp for
+for (long long int i = 0; i < size; i++) {
+    //....
+}
+As diretivas poderiam ser até mesmo separadas, com o #pragma omp parallel no main() e o #pragma omp for junto do for. A região paralela pode começar antes, mas o #pragma omp for precisa estar grudado no for sendo paralelizado.
+
+Exercício 2
+O código inicial padece de dois problemas:
+
+Condições de corrida;
+Baixa eficiência.
+Para encontrar as condições de corrida, basta lembrar que uma condição de corrida só consegue surgir se essas três afirmações forem verdadeiras:
+
+Há múltiplas threads;
+Essas threads acessam concorrentemente uma mesma variável/região de memória;
+Ao menos uma das threads fará uma escrita.
+Nessa atividade as condições 1 e 3 não são "negociáveis": queremos múltiplas threads e não podemos deixar de fazer as escritas nas variáveis. Nos resta então apenas a condição 2. Lembrem que o OpenMP possui 3 cláusulas para definir a visibilidade de variáveis:
+
+private(x): Cada thread da região paralela tem sua própria variável x. A variável não é inicializada, então o código dentro da região paralela deve fazer essa inicialização (caso contrário será lido lixo)
+firstprivate(x): Mesma coisa que private(x), mas o OpenMP inicializará a variável x local de cada thread com o valor que a variável tinha antes do início da região paralela.
+shared(x): Toda as threads da região paralela compartilham uma única instância da variável x.
+Para determinar se cada uma das variáveis é privada ou compartilhada, basta seguir essas regras:
+
+A variável é declarada dentro da região paralela? Se sim, ela será privada.
+A variável é a variável de controle do for sendo paralelizado por um #pragma omp for? Se sim, ela será privada.
+A variável aparece em uma cláusula C(x) onde C = private, firstprivate ou shared? Se sim, elas será considerada como "C".
+Se nenhum dos casos anteriores se aplica, ela será shared.
+Aplicando essas regras, vocês deveriam aplicar essa classificação no código:
+
+em vermelho estão as variáveis que sofrem de condição de corrida;
+em laranja estão as que são shared, mas só sofrem leitura;
+em verde estão as private.
+int i, j, k;
+#pragma omp parallel for schedule(dynamic, 1)
+for (i = 0; i < rows_left; ++i) {
+    for (j = 0; j < cols_right; ++j) {
+        out[i*cols_right+j] = 0;
+        #pragma omp parallel for firstprivate(i, j) schedule(guided)
+        for (k = 0; k < cols_left; ++k) 
+            out[i*cols_right+j] += left[i*cols_left+k]*right[k*cols_right+j];
+    }
+}
+Vejam que a variável j vira private no for de k, mas os quatro usos de j nas duas linhas que antecedem esse #pragma interno já são suficientes para causar dor e sofrimento.
+
+Após resolver a condição de corrida (tornando j private), podemos nos preocupar com o desempenho. A primeira observação nesse sentido é que esse código, por rodar sob OMP_NESTED=true criará muito mais threads do que núcleos físicos da sua máquina, não gerando ganhos de desempenho (muito pelo contrário!). Logo o #pragma interno deve ser removido. Ao remover o #pragma interno, a variável k sofrerá condições de corrida que devem ser resolvidas da mesma forma que no caso da variável j.
+
+O próximo passo a ser melhorado é a escolha do escalonador do OpenMP. A tabela abaixo compara os escalonadores básicos do OpenMP:
+
+Scheduler	Funcionamento	Vantagens	Desvantagens
+static	Cada thread calcula quais são os chunks (fatias) sob sua responsabilidade (chunk size default iterações / num_threads)	Sem comunicação entre threads = sem bloqueios ou stalls impostos por barreiras de memória e cache invalidation	Suscetível a load imbalance (alguns chunks demoram muito e outros demoram pouco -- algumas worker threads atrasarão o término do processamento por terem recebido chunks muito custosos). Ess política assume que tamanho_do_chunk determina completamente o tempo_de_processamento. Isso não é verdade sempre. Ex de algoritmos suscetíveis a load imbalance: algoritimos iterativos (aproximam um estado "fixo"/fixpoint), simulações com partículas (como o T1, se fosse feito particionamento do grid), algoritmos de ordenamento.
+dynamic	Cada thread "pega" um chunk de uma fila. Problema do 1 produtor e n consumidores(chunk size default 1)	Se o chunk for pequeno o suficiente, evita o load imbalance	Um chunk pequeno aumenta o custo de comunicação. Como há múltiplos consumidores, há a necessidade de bloquear consumidores durante o acesso à fila compartilhada. O próprio acesso por duas threads em cores diferentes a mesma memória pode causar breves atrasos devido a  detalhes da arquitetura do computador (pra quem fez/faz Organização: cache, execução fora de ordem e NUMA). Tempo gasto tentando obter um chunk é tempo desperdiçado, tornando o programa menos eficiente.
+guided	Similar ao dynamic, mas começa distribuindo chunks grandes e vai reduzindo até chegar ao tamanho limite fornecido (default 1)	Evita parte do overhead da política dynamic fazendo com que chunks pequenos só sejam usados perto do fim do trabalho	Ainda possui um overhead maior que o static, e não há garantia de que seja melhor que o dynamic para todo problema de qualquer tamanho.
+Esse problema, multiplicação de matrizes, é um problema razoavelmente bem comportado pois os valores das matrizes eram aleatórios. Não ocorre de uma porção da matriz ser muito mais "difícil de computar" do que o restante.
+
+Exercício 3
+Esse exercício era um caso para uso da cláusula reduction. As variáveis que devem ser privatizadas e, posteriormente, realizar a redução são avg e sd.
+
+double avg = 0;
+#pragma omp parallel for reduction(+:avg)
+for (int i = 0; i < size; ++i) 
+    avg += data[i];
+avg /= size;
+
+double sd = 0;
+#pragma omp parallel for reduction(+:sd)
+for (int i = 0; i < size; ++i) 
+    sd += pow(data[i] - avg, 2);
+sd = sqrt(sd / (size-1));
+
+return sd;
